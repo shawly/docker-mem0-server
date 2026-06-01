@@ -4,14 +4,19 @@
 FROM node:24-alpine AS base
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
+ENV CI=true
 
 # Dependencies
 FROM base AS deps
 COPY package.json yarn.lock* package-lock.json* pnpm-lock.yaml* ./
+# pnpm >= 10 refuses to silently skip dependency build scripts (strictDepBuilds),
+# which aborts install for packages like sharp/unrs-resolver. Turn that off so
+# install succeeds, then explicitly run the build scripts via approve-builds
+# (no hardcoded package names). Packages themselves are unchanged from upstream.
 RUN \
   if [ -f yarn.lock ]; then yarn --frozen-lockfile --network-timeout 600000; \
   elif [ -f package-lock.json ]; then npm ci; \
-  elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm i; \
+  elif [ -f pnpm-lock.yaml ]; then corepack enable pnpm && pnpm config set strict-dep-builds false && pnpm i && pnpm approve-builds --all; \
   else npm install; \
   fi
 

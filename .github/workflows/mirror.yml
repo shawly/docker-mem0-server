@@ -1,0 +1,136 @@
+name: mirror
+
+# Mirrors the mem0 self-hosted server + dashboard as container images.
+#
+#   - edge      : built from the upstream default branch, on every relevant change
+#   - vX.Y.Z    : built from upstream release tags that touched the component
+#
+# The repo is public, so Actions minutes are free — the schedule simply polls
+# upstream and the registry, and only builds when something actually changed
+# (source) or a base image was patched (digest drift). See .github/scripts.
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # daily; upstream releases are infrequent
+  workflow_dispatch:
+
+concurrency:
+  group: mirror
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  OWNER: ${{ github.repository_owner }}
+  UPSTREAM: mem0ai/mem0
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_builds: ${{ steps.plan.outputs.has_builds }}
+    steps:
+      - name: Checkout build tooling
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          path: upstream
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up crane
+        uses: ./.github/actions/setup-crane
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Plan builds
+        id: plan
+        working-directory: upstream
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          OWNER: ${{ env.OWNER }}
+        run: python3 "${GITHUB_WORKSPACE}/.github/scripts/discover.py"
+
+  build:
+    needs: discover
+    if: ${{ needs.discover.outputs.has_builds == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.matrix) }}
+    name: ${{ matrix.title }}:${{ matrix.version }}
+    steps:
+      - name: Checkout build tooling
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream @ ${{ matrix.ref }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ matrix.ref }}
+          path: upstream
+
+      - name: Set up crane
+        uses: ./.github/actions/setup-crane
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve base image digests
+        id: bases
+        run: |
+          all="$(python3 .github/scripts/bases.py "upstream/${{ matrix.dockerfile }}")"
+          primary="${all##*,}"
+          {
+            echo "all=${all}"
+            echo "name=${primary%@*}"
+            echo "digest=${primary##*@}"
+          } >>"$GITHUB_OUTPUT"
+          echo "Bases: ${all}"
+
+      - name: Build and push ${{ matrix.title }}:${{ matrix.version }}
+        uses: docker/build-push-action@v7
+        with:
+          context: upstream/${{ matrix.context }}
+          file: upstream/${{ matrix.dockerfile }}
+          platforms: ${{ env.PLATFORMS }}
+          push: true
+          tags: ${{ matrix.tags }}
+          cache-from: type=gha,scope=${{ matrix.title }}-${{ matrix.version }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.title }}-${{ matrix.version }}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.title }}
+            org.opencontainers.image.description=Unofficial mem0 ${{ matrix.component }} image (built from ${{ env.UPSTREAM }})
+            org.opencontainers.image.source=https://github.com/${{ env.UPSTREAM }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ matrix.revision }}
+            org.opencontainers.image.version=${{ matrix.version }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.base.name=${{ steps.bases.outputs.name }}
+            org.opencontainers.image.base.digest=${{ steps.bases.outputs.digest }}
+            mirror.base.digests=${{ steps.bases.outputs.all }}

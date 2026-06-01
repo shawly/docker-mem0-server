@@ -1,0 +1,10 @@
+name: Setup crane
+description: Install the crane CLI (go-containerregistry) into /usr/local/bin.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        curl -fsSL "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
+          | sudo tar -xzf - -C /usr/local/bin crane
+        crane version

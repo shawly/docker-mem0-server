@@ -128,44 +128,32 @@ def plan_edge(comp: Component, head: str) -> dict | None:
 
 
 def plan_versions(comp: Component, tags: list[str]) -> list[dict]:
-    # Versions whose image should exist = versions that changed this component.
-    changed: list[str] = []
+    # We keep only one released image per component: the newest release that
+    # actually changed it. Older versions are never (re)built, so there is no
+    # backfill — `latest`, `vX`, `vX.Y` all point at this single build.
+    target: str | None = None
     prev: str | None = None
     for v in tags:
         if prev is None or component_changed(comp, prev, v):
-            changed.append(v)
+            target = v
         prev = v
-    if not changed:
+    if target is None:
         return []
 
-    # Owner of each moving tag = the greatest version in its group.
-    owns_minor: dict[str, str] = {}
-    owns_major: dict[str, str] = {}
-    for v in changed:
-        major, minor, _ = v[1:].split(".")
-        owns_minor[f"v{major}.{minor}"] = v
-        owns_major[f"v{major}"] = v
-    latest = changed[-1]
+    # Rebuild only if missing or its base image drifted to a new digest.
+    if image_exists(f"{comp.image}:{target}") and not base_drifted(f"{comp.image}:{target}"):
+        return []
 
-    planned: list[dict] = []
-    for v in changed:
-        major, minor, _ = v[1:].split(".")
-        mm, maj = f"v{major}.{minor}", f"v{major}"
-        newest_of_minor = owns_minor[mm] == v  # the freshness set for base drift
-
-        if image_exists(f"{comp.image}:{v}"):
-            if not (newest_of_minor and base_drifted(f"{comp.image}:{v}")):
-                continue
-
-        revision = git("rev-parse", f"{v}^{{commit}}")
-        moving = [t for t, owner in ((mm, owns_minor[mm]), (maj, owns_major[maj]))
-                  if owner == v]
-        if latest == v:
-            moving.append("latest")
-        tags_out = [f"{comp.image}:{v}", *sha_tags(comp.image, revision)]
-        tags_out += [f"{comp.image}:{m}" for m in moving]
-        planned.append(entry(comp, ref=v, revision=revision, version=v, tags=tags_out))
-    return planned
+    major, minor, _ = target[1:].split(".")
+    revision = git("rev-parse", f"{target}^{{commit}}")
+    tags_out = [
+        f"{comp.image}:{target}",
+        *sha_tags(comp.image, revision),
+        f"{comp.image}:v{major}.{minor}",
+        f"{comp.image}:v{major}",
+        f"{comp.image}:latest",
+    ]
+    return [entry(comp, ref=target, revision=revision, version=target, tags=tags_out)]
 
 
 def entry(comp: Component, *, ref: str, revision: str, version: str,

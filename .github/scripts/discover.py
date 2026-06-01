@@ -17,24 +17,31 @@ upstream repo (all tags + history). Writes ``matrix`` and ``has_builds`` to
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 REGISTRY = os.environ.get("REGISTRY", "ghcr.io")
 OWNER = os.environ["OWNER"]
 SEMVER = re.compile(r"^v\d+\.\d+\.\d+$")
+
+# We build with our own vendored Dockerfiles (this repo) against the upstream
+# source as build context. discover.py runs inside the upstream checkout, so our
+# Dockerfiles live under $GITHUB_WORKSPACE.
+WORKSPACE = Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd().parent)
 
 
 @dataclass(frozen=True)
 class Component:
     name: str
     image: str
-    context: str
-    dockerfile: str
+    context: str      # build context, relative to the upstream checkout
+    dockerfile: str   # our Dockerfile, relative to this repo (WORKSPACE)
     pathspec: tuple[str, ...]  # git pathspec scoping "did this component change?"
 
 
@@ -43,14 +50,14 @@ COMPONENTS = [
         "server",
         f"{REGISTRY}/{OWNER}/mem0-server",
         "server",
-        "server/Dockerfile",
+        "dockerfiles/server/Dockerfile",
         ("server", ":(exclude)server/dashboard"),
     ),
     Component(
         "dashboard",
         f"{REGISTRY}/{OWNER}/mem0-dashboard",
         "server/dashboard",
-        "server/dashboard/Dockerfile",
+        "dockerfiles/dashboard/Dockerfile",
         ("server/dashboard",),
     ),
 ]
@@ -95,6 +102,26 @@ def base_drifted(ref: str) -> bool:
     return False
 
 
+def dockerfile_digest(comp: Component) -> str:
+    return "sha256:" + hashlib.sha256((WORKSPACE / comp.dockerfile).read_bytes()).hexdigest()
+
+
+def dockerfile_changed(ref: str, comp: Component) -> bool:
+    """True if our Dockerfile differs from the one ``ref`` was built with.
+
+    Covers Dockerfiles we maintain ourselves (e.g. a Dependabot base-image bump):
+    a published image carries the digest of the Dockerfile it was built from, so
+    a mismatch — including images built before this label existed — forces a
+    rebuild.
+    """
+    return label_value(ref, "mirror.dockerfile.digest") != dockerfile_digest(comp)
+
+
+def needs_refresh(ref: str, comp: Component) -> bool:
+    """An already-published image is stale if its base or Dockerfile changed."""
+    return base_drifted(ref) or dockerfile_changed(ref, comp)
+
+
 # --- git: the source of truth for "what changed" ----------------------------
 
 def component_changed(comp: Component, frm: str, to: str) -> bool:
@@ -116,9 +143,9 @@ def plan_edge(comp: Component, head: str) -> dict | None:
     else:
         last = label_value(edge, "org.opencontainers.image.revision")
         if last == head:
-            build = base_drifted(edge)  # source identical, base may have moved
+            build = needs_refresh(edge, comp)  # source identical; base/Dockerfile?
         elif last and git_ok("cat-file", "-e", f"{last}^{{commit}}"):
-            build = component_changed(comp, last, head) or base_drifted(edge)
+            build = component_changed(comp, last, head) or needs_refresh(edge, comp)
         else:
             build = True  # unknown / unreachable previous build
     if not build:
@@ -140,8 +167,8 @@ def plan_versions(comp: Component, tags: list[str]) -> list[dict]:
     if target is None:
         return []
 
-    # Rebuild only if missing or its base image drifted to a new digest.
-    if image_exists(f"{comp.image}:{target}") and not base_drifted(f"{comp.image}:{target}"):
+    # Rebuild only if missing, or its base image / Dockerfile changed.
+    if image_exists(f"{comp.image}:{target}") and not needs_refresh(f"{comp.image}:{target}", comp):
         return []
 
     major, minor, _ = target[1:].split(".")

@@ -8,3 +8,14 @@ updates:
       github-actions:
         patterns:
           - "*"
+
+  - package-ecosystem: docker
+    directories:
+      - /dockerfiles/server
+      - /dockerfiles/dashboard
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        patterns:
+          - "*"

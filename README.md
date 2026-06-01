@@ -4,9 +4,15 @@ Unofficial container images for the **[mem0](https://github.com/mem0ai/mem0)**
 self-hosted server and dashboard.
 
 mem0 ships a `server/` directory with Dockerfiles but publishes no prebuilt
-images. This repo is a thin pipeline that mirrors those Dockerfiles into images
-on a schedule. It contains **no upstream source code** — every build checks out
-mem0 at the relevant commit/tag and builds it directly.
+images. This repo is a thin pipeline that builds and publishes them on a
+schedule. It contains **no upstream source code** — every build checks out mem0
+at the relevant commit/tag and uses it as the build context.
+
+It does, however, keep its **own copies of the Dockerfiles** under
+[`dockerfiles/`](dockerfiles), because upstream isn't maintaining theirs (e.g.
+the dashboard was pinned to an EOL Node that no longer builds). These are minimal
+edits over upstream's Dockerfiles and are kept current via Dependabot; the
+application code itself always comes from upstream unchanged.
 
 ## Images
 

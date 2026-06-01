@@ -11,6 +11,10 @@ name: mirror
 # (source) or a base image was patched (digest drift). See .github/scripts.
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "dockerfiles/**"   # we maintain the Dockerfiles; rebuild when they change
   schedule:
     - cron: "17 4 * * *"   # daily; upstream releases are infrequent
   workflow_dispatch:
@@ -102,15 +106,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve base image digests
+      - name: Resolve build metadata
         id: bases
         run: |
-          all="$(python3 .github/scripts/bases.py "upstream/${{ matrix.dockerfile }}")"
+          all="$(python3 .github/scripts/bases.py "${{ matrix.dockerfile }}")"
           primary="${all##*,}"
           {
             echo "all=${all}"
             echo "name=${primary%@*}"
             echo "digest=${primary##*@}"
+            echo "dockerfile=sha256:$(sha256sum "${{ matrix.dockerfile }}" | cut -d' ' -f1)"
           } >>"$GITHUB_OUTPUT"
           echo "Bases: ${all}"
 
@@ -118,7 +123,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: upstream/${{ matrix.context }}
-          file: upstream/${{ matrix.dockerfile }}
+          file: ${{ matrix.dockerfile }}
           platforms: ${{ env.PLATFORMS }}
           push: true
           tags: ${{ matrix.tags }}
@@ -135,3 +140,4 @@ jobs:
             org.opencontainers.image.base.name=${{ steps.bases.outputs.name }}
             org.opencontainers.image.base.digest=${{ steps.bases.outputs.digest }}
             mirror.base.digests=${{ steps.bases.outputs.all }}
+            mirror.dockerfile.digest=${{ steps.bases.outputs.dockerfile }}

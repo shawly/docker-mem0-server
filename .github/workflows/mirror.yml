@@ -31,13 +31,13 @@ env:
   REGISTRY: ghcr.io
   OWNER: ${{ github.repository_owner }}
   UPSTREAM: mem0ai/mem0
-  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   discover:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
+      builds: ${{ steps.plan.outputs.builds }}
+      merges: ${{ steps.plan.outputs.merges }}
       has_builds: ${{ steps.plan.outputs.has_builds }}
     steps:
       - name: Checkout build tooling
@@ -69,16 +69,18 @@ jobs:
           OWNER: ${{ env.OWNER }}
         run: python3 "${GITHUB_WORKSPACE}/.github/scripts/discover.py"
 
+  # One per-arch build per image, each on its native runner (no QEMU). Images
+  # are pushed by digest (untagged); the merge job assembles the manifest list.
   build:
     needs: discover
     if: ${{ needs.discover.outputs.has_builds == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        include: ${{ fromJson(needs.discover.outputs.matrix) }}
-    name: ${{ matrix.title }}:${{ matrix.version }}
+        include: ${{ fromJson(needs.discover.outputs.builds) }}
+    name: ${{ matrix.title }}:${{ matrix.version }} (${{ matrix.arch }})
     steps:
       - name: Checkout build tooling
         uses: actions/checkout@v6
@@ -92,9 +94,6 @@ jobs:
 
       - name: Set up crane
         uses: ./.github/actions/setup-crane
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v4
@@ -119,16 +118,16 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "Bases: ${all}"
 
-      - name: Build and push ${{ matrix.title }}:${{ matrix.version }}
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: upstream/${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
-          platforms: ${{ env.PLATFORMS }}
-          push: true
-          tags: ${{ matrix.tags }}
-          cache-from: type=gha,scope=${{ matrix.title }}-${{ matrix.version }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.title }}-${{ matrix.version }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.key }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.key }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.title=${{ matrix.title }}
             org.opencontainers.image.description=Unofficial mem0 ${{ matrix.component }} image (built from ${{ env.UPSTREAM }})
@@ -141,3 +140,58 @@ jobs:
             org.opencontainers.image.base.digest=${{ steps.bases.outputs.digest }}
             mirror.base.digests=${{ steps.bases.outputs.all }}
             mirror.dockerfile.digest=${{ steps.bases.outputs.dockerfile }}
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.key }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the per-arch digests of each image into one tagged manifest list.
+  merge:
+    needs: [discover, build]
+    if: ${{ needs.discover.outputs.has_builds == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover.outputs.merges) }}
+    name: ${{ matrix.title }}:${{ matrix.version }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-${{ matrix.key }}-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        working-directory: /tmp/digests
+        run: |
+          tags=""; for t in ${TAGS//,/ }; do tags="$tags -t $t"; done
+          sources=""; for d in *; do sources="$sources ${IMAGE}@sha256:$d"; done
+          docker buildx imagetools create $tags $sources
+        env:
+          TAGS: ${{ matrix.tags }}
+          IMAGE: ${{ matrix.image }}
+
+      - name: Inspect
+        run: docker buildx imagetools inspect "${{ matrix.image }}:${{ matrix.version }}"

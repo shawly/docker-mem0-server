@@ -198,6 +198,14 @@ def entry(comp: Component, *, ref: str, revision: str, version: str,
     }
 
 
+# Each arch is built on its own native runner and the results merged into one
+# manifest list — no QEMU emulation (which SIGILLs building Node on arm64).
+PLATFORMS = [
+    {"platform": "linux/amd64", "arch": "amd64", "runner": "ubuntu-24.04"},
+    {"platform": "linux/arm64", "arch": "arm64", "runner": "ubuntu-24.04-arm"},
+]
+
+
 def main() -> None:
     head = git("rev-parse", "HEAD")
     versions = sorted(
@@ -205,22 +213,35 @@ def main() -> None:
         key=lambda v: tuple(int(p) for p in v[1:].split(".")),
     )
 
-    entries: list[dict] = []
+    plan: list[dict] = []
     for comp in COMPONENTS:
         edge = plan_edge(comp, head)
         if edge:
-            entries.append(edge)
-        entries.extend(plan_versions(comp, versions))
+            plan.append(edge)
+        plan.extend(plan_versions(comp, versions))
 
-    output = "\n".join(
-        [f"matrix={json.dumps(entries)}",
-         f"has_builds={'true' if entries else 'false'}"]
-    )
+    # Fan each planned image out to one per-arch build (native runner, pushed by
+    # digest) plus one merge (assembles the digests into the tagged manifest).
+    builds: list[dict] = []
+    merges: list[dict] = []
+    for e in plan:
+        key = f"{e['component']}-{e['version']}"  # also the artifact key
+        merges.append({"image": e["image"], "title": e["title"],
+                       "version": e["version"], "tags": e["tags"], "key": key})
+        for p in PLATFORMS:
+            builds.append({k: e[k] for k in
+                           ("component", "image", "context", "dockerfile",
+                            "ref", "revision", "version", "title")}
+                          | {**p, "key": key})
+
+    out = [f"builds={json.dumps(builds)}",
+           f"merges={json.dumps(merges)}",
+           f"has_builds={'true' if plan else 'false'}"]
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-        fh.write(output + "\n")
+        fh.write("\n".join(out) + "\n")
 
-    print(f"Planned {len(entries)} build(s):", file=sys.stderr)
-    for e in entries:
+    print(f"Planned {len(plan)} image(s), {len(builds)} per-arch build(s):", file=sys.stderr)
+    for e in plan:
         print(f"  - {e['title']}:{e['version']}  [{e['tags']}]", file=sys.stderr)
 
 

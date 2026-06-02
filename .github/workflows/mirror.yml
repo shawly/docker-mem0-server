@@ -11,6 +11,12 @@ name: mirror
 # (source) or a base image was patched (digest drift). See .github/scripts.
 
 on:
+  pull_request:
+    paths:                 # validate that changes still build (never pushes)
+      - "dockerfiles/**"
+      - ".github/actions/**"
+      - ".github/scripts/**"
+      - ".github/workflows/mirror.yml"
   push:
     branches: [main]
     paths:
@@ -20,8 +26,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: mirror
-  cancel-in-progress: false
+  # Serialize publishing runs (shared main ref); give each PR its own group.
+  group: mirror-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -118,14 +125,15 @@ jobs:
           } >>"$GITHUB_OUTPUT"
           echo "Bases: ${all}"
 
-      - name: Build and push by digest
+      - name: Build${{ github.event_name == 'pull_request' && ' (no push, PR validation)' || ' and push by digest' }}
         id: build
         uses: docker/build-push-action@v7
         with:
           context: upstream/${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platform }}
-          outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          # push only on non-PR events; PRs build to validate but never publish
+          outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=${{ matrix.key }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.key }}-${{ matrix.arch }}
           labels: |
@@ -142,12 +150,14 @@ jobs:
             mirror.dockerfile.digest=${{ steps.bases.outputs.dockerfile }}
 
       - name: Export digest
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
+        if: ${{ github.event_name != 'pull_request' }}
         uses: actions/upload-artifact@v4
         with:
           name: digest-${{ matrix.key }}-${{ matrix.arch }}
@@ -156,9 +166,10 @@ jobs:
           retention-days: 1
 
   # Assemble the per-arch digests of each image into one tagged manifest list.
+  # Publishing only — skipped entirely on pull requests.
   merge:
     needs: [discover, build]
-    if: ${{ needs.discover.outputs.has_builds == 'true' }}
+    if: ${{ needs.discover.outputs.has_builds == 'true' && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

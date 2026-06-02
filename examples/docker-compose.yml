@@ -1,0 +1,83 @@
+name: mem0
+
+# Self-hosted mem0 server + dashboard using an EXTERNAL Milvus you already run
+# as the vector store. Postgres here is ONLY the application database (users,
+# API keys, request logs, settings) — memory vectors live in your Milvus, and
+# mem0's change history is SQLite on the mem0_history volume.
+#
+# Quick start:
+#   1. cp .env.example .env   &&  edit .env  (set OPENAI_API_KEY, JWT_SECRET,
+#      POSTGRES_PASSWORD, and the MILVUS_* values for your server)
+#   2. docker compose up -d
+#
+# Images are built by https://github.com/shawly/docker-mem0-server — pin a
+# version tag (e.g. :v2.0.3) instead of :latest for reproducible deploys.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mem0}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${APP_DB_NAME:-mem0_app}
+    volumes:
+      - mem0_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mem0:
+    image: ghcr.io/shawly/mem0-server:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Point the app DB at the bundled postgres service (overrides .env).
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+    # The image's default CMD uses --reload (dev). Run migrations, then serve.
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn main:app --host 0.0.0.0 --port 8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - mem0_history:/app/history
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # python:3.12-slim ships no curl/wget; use urllib against the public docs.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/docs').status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+
+  mem0-dashboard:
+    image: ghcr.io/shawly/mem0-dashboard:latest
+    restart: unless-stopped
+    environment:
+      # Browser-facing API URL — must be reachable from your browser, not just
+      # from inside the compose network. Change to your host/domain if remote.
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      # Server-side (SSR) calls stay on the internal network.
+      API_INTERNAL_URL: http://mem0:8000
+      NEXT_PUBLIC_INSTANCE_NAME: ${NEXT_PUBLIC_INSTANCE_NAME:-Mem0}
+    depends_on:
+      mem0:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mem0_postgres:
+  mem0_history:
+
+# No Milvus yet? See examples/README.md for a minimal standalone Milvus service
+# you can drop in here, plus how to create a dedicated MILVUS_DB_NAME.

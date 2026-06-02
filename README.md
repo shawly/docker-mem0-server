@@ -32,6 +32,18 @@ Every image carries OCI labels pointing back to its origin — including
 `org.opencontainers.image.revision` (the upstream commit) and
 `org.opencontainers.image.base.{name,digest}` (the base image it was built on).
 
+## Usage
+
+See [`examples/`](examples) for a complete `docker-compose.yml` (server +
+dashboard + Postgres) wired to an external **Milvus** vector store, plus an
+exhaustive [`.env.example`](examples/.env.example).
+
+The server image adds a couple of things upstream lacks: it bundles `pymilvus`
+and lets you pick the vector store with `MEM0_VECTOR_STORE` (`pgvector` —
+upstream default — or `milvus`). With `MEM0_VECTOR_STORE=milvus`, memory vectors
+go to your Milvus while Postgres holds only the app database. See the
+[example README](examples/README.md) for details.
+
 ## Tags
 
 Tracking the upstream default branch:

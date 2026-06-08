@@ -1,7 +1,7 @@
 # Node base bumped from upstream's node:20-alpine: a dashboard dependency now
 # imports the node:sqlite built-in, which requires Node >= 22.5. node:24 is the
 # latest LTS line. Packages are otherwise unchanged from upstream.
-FROM node:24-alpine AS base
+FROM node:26-alpine AS base
 RUN apk add --no-cache libc6-compat
 WORKDIR /app
 ENV CI=true
